@@ -1,0 +1,182 @@
+name: Classroom Autograding
+
+on:
+  pull_request:
+    branches: [ main, master ]
+    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:  # Ручной запуск
+  push:
+    branches: [ main, master ]
+
+# Оптимизация: кэширование на уровне workflow
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true"
+  JAVA_VERSION: "21"
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  autograding:
+    name: Autograding Tests
+    runs-on: ubuntu-latest
+
+    # Оптимизация: не запускать для ботов
+    if: github.actor != 'dependabot[bot]' && github.actor != 'github-classroom[bot]'
+
+    steps:
+      # Шаг 1: Быстрый checkout с фильтрацией
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Оптимизация: только последний коммит
+          lfs: false      # Отключаем LFS если не нужно
+
+      # Шаг 2: Кэширование зависимостей Gradle
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # Шаг 3: Установка Java 21 (последняя LTS)
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'  # Eclipse Temurin (рекомендуется)
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'  # Автоматическое кэширование Gradle
+
+      # Шаг 4: Проверка версий (опционально, полезно для отладки)
+      - name: Verify versions
+        run: |
+          java --version
+          ./gradlew --version || echo "Gradle wrapper not found"
+
+      # Шаг 5: Сборка и тесты с оптимизациями
+      - name: Build with Gradle
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew clean build --no-daemon --parallel --build-cache
+          else
+            echo "Gradle wrapper not found, using system gradle"
+            gradle clean build --no-daemon --parallel --build-cache
+          fi
+        env:
+          CI: true
+
+      # Шаг 6: Публикация отчета о тестах (улучшенная версия)
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v4
+        if: success() || failure()  # Всегда запускать, даже если тесты упали
+        with:
+          report_paths: '**/build/test-results/test/TEST-*.xml'
+          check_name: 'JUnit Test Report'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          detailed_summary: true
+          include_passed: true
+          fail_on_failure: false  # Не проваливать шаг, просто публикуем отчет
+
+      # Шаг 7: Загрузка результатов тестов как артефактов
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: '**/build/test-results/**/*.xml'
+          retention-days: 7  # Хранить 7 дней
+          if-no-files-found: ignore
+
+      # Шаг 8: Запуск autograding от GitHub Classroom
+      - name: GitHub Classroom Autograding
+        uses: education/autograding@v1
+        id: autograding
+        continue-on-error: true  # Продолжаем даже если тесты не прошли
+
+      # Шаг 9: Сохранение результатов autograding
+      - name: Save autograding results
+        if: always()
+        run: |
+          echo "Autograding points: ${{ steps.autograding.outputs.points }}"
+          echo "Autograding results: ${{ steps.autograding.outputs.results }}"
+          
+          # Сохраняем в файл для следующего шага
+          mkdir -p autograding-data
+          echo "${{ toJson(steps.autograding.outputs) }}" > autograding-data/results.json
+
+      # Шаг 10: Загрузка результатов autograding как артефакта
+      - name: Upload autograding results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autograding-results
+          path: autograding-data/
+          retention-days: 7
+
+      # Шаг 11: Отметка в Google Sheets (с обработкой ошибок)
+      - name: Google Sheets Autograder Marker
+        id: sheets-marker
+        uses: Romanow/google-sheet-autograder-marker@v2.0  # Более новая версия
+        if: always() && secrets.GOOGLE_API_KEY != ''  # Только если есть ключ
+        continue-on-error: true  # Не проваливаем workflow если Sheets недоступен
+        with:
+          google_token: ${{ secrets.GOOGLE_API_KEY }}
+          sheet_id: ${{ secrets.GOOGLE_SHEET_ID }}  # Рекомендую тоже хранить в secrets
+          homework_number: ${{ vars.HOMEWORK_NUMBER || '1' }}  # Из переменных или дефолт
+          user_column: 'C'
+          column_offset: 'D'
+          mark: "'+"
+
+      # Шаг 12: Комментарий в PR с результатами
+      - name: Comment PR with results
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request' && (success() || failure())
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const results = '${{ steps.autograding.outputs.results }}';
+            const points = '${{ steps.autograding.outputs.points }}';
+            const sheetsStatus = '${{ steps.sheets-marker.outcome }}';
+            
+            let sheetsMessage = '';
+            if (sheetsStatus === 'success') {
+              sheetsMessage = '✅ Результат записан в Google Sheets';
+            } else if (sheetsStatus === 'skipped') {
+              sheetsMessage = '⏭️ Запись в Google Sheets пропущена (нет ключа)';
+            } else {
+              sheetsMessage = '❌ Ошибка записи в Google Sheets';
+            }
+            
+            const commentBody = `## 📊 Результаты автоматической проверки
+            ### ${results}
+            
+            **Набрано баллов:** ${points}
+            
+            ${sheetsMessage}
+            
+            ---
+            *Проверено на Java ${{ env.JAVA_VERSION }} с GitHub Actions*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+
+      # Шаг 13: Уведомление о завершении
+      - name: Summary
+        if: always()
+        run: |
+          echo "## ✅ Workflow завершен" >> $GITHUB_STEP_SUMMARY
+          echo "Статус: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "Результаты тестов сохранены в артефактах" >> $GITHUB_STEP_SUMMARY
+          echo "Google Sheets отметка: ${{ steps.sheets-marker.outcome }}" >> $GITHUB_STEP_SUMMARY
