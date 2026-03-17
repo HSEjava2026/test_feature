@@ -124,7 +124,7 @@ jobs:
       # Шаг 11: Отметка в Google Sheets (с обработкой ошибок)
       - name: Google Sheets Autograder Marker
         id: sheets-marker
-        uses: Romanow/google-sheet-autograder-marker@v2.0  # Более новая версия
+        uses: Romanow/google-sheet-autograder-marker@v1.0  
         if: always() 
         continue-on-error: true  # Не проваливаем workflow если Sheets недоступен
         with:
