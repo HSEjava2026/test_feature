@@ -125,7 +125,7 @@ jobs:
       - name: Google Sheets Autograder Marker
         id: sheets-marker
         uses: Romanow/google-sheet-autograder-marker@v2.0  # Более новая версия
-        if: always() && secrets.GOOGLE_API_KEY != ''  # Только если есть ключ
+        if: always() 
         continue-on-error: true  # Не проваливаем workflow если Sheets недоступен
         with:
           google_token: ${{ secrets.GOOGLE_API_KEY }}
